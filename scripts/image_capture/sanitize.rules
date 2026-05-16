@@ -1,0 +1,136 @@
+# Sanitization rules. Format is one rule per line:
+#   STRIP <path-or-glob>          remove from archive
+#   REPLACE <path> <inline-mode>  replace with the given inline content
+#     where <inline-mode> is one of:
+#       empty               replace with zero bytes
+#       shadow-stub         replace with our known root-only shadow file
+#       passwd-strip-gecos  rewrite passwd lines to strip GECOS field
+#       fstab-strip-data    comment out non-system fstab entries
+#
+# Pattern rules for STRIP:
+#   /absolute/path/glob   matched with find -path; * matches ANY chars
+#                         including '/'. Trailing /* is required to match
+#                         children, not the directory itself.
+#   **/<glob>             matched with find -name against the basename
+#                         only (so the entry can be at any depth).
+#
+# Read every line. If anything looks too aggressive or not aggressive enough,
+# edit before running sanitize.sh. The sanitizer logs every rule it applies.
+
+# ── 1. user databases & credentials ──────────────────────────────────────────
+REPLACE /etc/shadow shadow-stub
+REPLACE /etc/gshadow shadow-stub
+REPLACE /etc/passwd passwd-strip-gecos
+STRIP   /etc/sudoers.d/*
+STRIP   /etc/security/opasswd
+STRIP   /var/lib/extrausers/shadow
+STRIP   /var/lib/extrausers/passwd
+STRIP   /etc/krb5.keytab
+STRIP   /etc/ipsec.secrets
+
+# ── 2. ssh ───────────────────────────────────────────────────────────────────
+STRIP /etc/ssh/ssh_host_*
+STRIP /root/.ssh/*
+STRIP /home/*/.ssh/*
+STRIP **/authorized_keys
+STRIP **/known_hosts
+
+# ── 3. network credentials ───────────────────────────────────────────────────
+STRIP /etc/NetworkManager/system-connections/*
+STRIP /var/lib/NetworkManager/*
+STRIP /etc/wpa_supplicant/*
+STRIP /var/lib/iwd/*
+STRIP /etc/network/interfaces
+STRIP /etc/network/interfaces.d/*
+STRIP /etc/dhcp/dhclient.conf
+STRIP /etc/chrony.keys
+STRIP /etc/chrony/chrony.keys
+STRIP /etc/ntp.keys
+STRIP /etc/openvpn/*
+STRIP **/wg0.conf
+STRIP **/wg-*.conf
+
+# ── 4. file sharing credentials ──────────────────────────────────────────────
+STRIP /etc/samba/smbpasswd
+STRIP /etc/samba/passdb.tdb
+STRIP /etc/samba/secrets.tdb
+STRIP /var/lib/samba/private/*
+STRIP /etc/exports
+STRIP /etc/exports.d/*
+
+# ── 5. ugreen / ugos identity, accounts, cloud binding ───────────────────────
+# Be aggressive: strip the entire vendor config trees. The VM doesn't need any
+# of this to boot, and these dirs are the most likely place for tokens that
+# we haven't enumerated by name.
+STRIP /etc/ugreen
+STRIP /etc/ugreen/*
+STRIP /etc/ugos
+STRIP /etc/ugos/*
+STRIP /etc/ugnas
+STRIP /etc/ugnas/*
+STRIP /var/lib/ugreen
+STRIP /var/lib/ugreen/*
+STRIP /var/lib/ugos
+STRIP /var/lib/ugos/*
+STRIP /var/lib/ugnas
+STRIP /var/lib/ugnas/*
+
+# ── 6. shell / app histories (often hold tokens, passwords pasted into curl) ─
+STRIP /root/.bash_history
+STRIP /root/.zsh_history
+STRIP /root/.mysql_history
+STRIP /root/.psql_history
+STRIP /root/.python_history
+STRIP /home/*/.bash_history
+STRIP /home/*/.zsh_history
+STRIP /home/*/.mysql_history
+STRIP /home/*/.psql_history
+STRIP /home/*/.python_history
+
+# ── 7. cloud / container / package-manager credentials ───────────────────────
+STRIP /root/.aws/*
+STRIP /root/.config/gcloud/*
+STRIP /root/.config/azure/*
+STRIP /root/.docker/config.json
+STRIP /root/.kube/config
+STRIP /root/.netrc
+STRIP /home/*/.aws/*
+STRIP /home/*/.config/gcloud/*
+STRIP /home/*/.config/azure/*
+STRIP /home/*/.docker/config.json
+STRIP /home/*/.kube/config
+STRIP /home/*/.netrc
+
+# ── 8. database server data dirs (huge, may contain user data) ───────────────
+STRIP /var/lib/mysql
+STRIP /var/lib/mysql/*
+STRIP /var/lib/postgresql
+STRIP /var/lib/postgresql/*
+STRIP /var/lib/redis/*
+STRIP /var/lib/mongodb/*
+
+# ── 9. generic key / cert / token / credential file patterns ─────────────────
+# These are basename-globs (**/...) so they catch files at any depth.
+STRIP **/*.pem
+STRIP **/*.key
+STRIP **/*.pfx
+STRIP **/*.p12
+STRIP **/*.jks
+STRIP **/id_rsa
+STRIP **/id_ecdsa
+STRIP **/id_ed25519
+STRIP **/id_dsa
+STRIP **/*credentials*
+STRIP **/*.token
+STRIP **/api_key*
+STRIP **/apikey*
+STRIP **/secret*
+STRIP **/*.psk
+
+# ── 10. fstab: strip data-pool entries so the VM doesn't try to mount them ──
+REPLACE /etc/fstab fstab-strip-data
+
+# ── 11. machine identity ─────────────────────────────────────────────────────
+REPLACE /etc/machine-id empty
+REPLACE /var/lib/dbus/machine-id empty
+STRIP   /etc/hostid

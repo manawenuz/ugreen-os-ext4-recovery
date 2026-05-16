@@ -19,6 +19,14 @@
 # Usage:
 #   sudo ./scripts/volunteer_validate.sh                  # auto-detect target
 #   sudo ./scripts/volunteer_validate.sh /dev/mapper/ug_… # explicit target
+#   sudo ./scripts/volunteer_validate.sh --os ugos /dev/mapper/ug_…
+#   sudo ./scripts/volunteer_validate.sh --os vanilla /dev/sdb1
+#
+# Flags:
+#   --os {ugos|vanilla|auto}   Force the environment classification. Useful
+#                              when auto-detection misses (e.g. UGOS Pro on
+#                              a kernel string the regex doesn't recognise).
+#                              Default: auto.
 #
 # Output: a tarball at ./btrfs_volunteer_report_<timestamp>.tar.gz containing
 #   * report.txt          — full transcript
@@ -90,32 +98,114 @@ echo "===== Environment ====="
 
 IS_UGOS="no"
 UGOS_HINTS=()
-if [ -f /etc/ugreen-release ]; then
+# 1. Release / version files
+for f in /etc/ugreen-release /etc/ugos-release /etc/ugos_version \
+         /etc/ugreen_version /etc/ugnas-release; do
+    if [ -f "$f" ]; then
+        IS_UGOS="yes"
+        UGOS_HINTS+=("$f exists")
+    fi
+done
+# 2. os-release ID/NAME fields
+if [ -f /etc/os-release ] && grep -qiE '^(ID|NAME|PRETTY_NAME)=.*(ugreen|ugos)' /etc/os-release; then
     IS_UGOS="yes"
-    UGOS_HINTS+=("/etc/ugreen-release exists")
+    UGOS_HINTS+=("/etc/os-release mentions ugreen/ugos")
 fi
-if uname -a | grep -qiE 'ugreen|ugos'; then
+# 3. Kernel release / OS name (exclude hostname/nodename to avoid false
+#    positives if a user named their machine "ugos-test" etc.)
+if uname -r | grep -qiE 'ugreen|ugos|ugnas'; then
     IS_UGOS="yes"
-    UGOS_HINTS+=("uname mentions ugreen/ugos")
+    UGOS_HINTS+=("kernel release mentions ugreen/ugos")
 fi
-if [ -d /etc/ugreen ] || command -v ugreen-nas >/dev/null 2>&1; then
+if uname -v | grep -qiE 'ugreen|ugos|ugnas'; then
     IS_UGOS="yes"
-    UGOS_HINTS+=("UGREEN userspace tooling present")
+    UGOS_HINTS+=("kernel build string mentions ugreen/ugos")
 fi
+# 4. Userspace tooling and config dirs
+for d in /etc/ugreen /etc/ugos /etc/ugnas /usr/lib/ugreen /usr/lib/ugos \
+         /usr/share/ugreen /usr/share/ugos /var/lib/ugreen /var/lib/ugos; do
+    if [ -d "$d" ]; then
+        IS_UGOS="yes"
+        UGOS_HINTS+=("$d directory present")
+        break
+    fi
+done
+if command -v ugreen-nas >/dev/null 2>&1 || command -v ugos-cli >/dev/null 2>&1; then
+    IS_UGOS="yes"
+    UGOS_HINTS+=("UGREEN userspace tooling on PATH")
+fi
+# 5. Live kernel evidence: dmesg announces UGACL on mount
+if dmesg 2>/dev/null | grep -qE 'BTRFS.*UGACL|Set btrfs UGACL|btrfs.*ugacl|ugreen_proprietary'; then
+    IS_UGOS="yes"
+    UGOS_HINTS+=("dmesg shows UGACL/ugreen_proprietary")
+fi
+# 6. Device-mapper naming convention used by UGOS
+if ls /dev/mapper/ug_* >/dev/null 2>&1; then
+    IS_UGOS="yes"
+    UGOS_HINTS+=("/dev/mapper/ug_* devices present")
+fi
+
+# ── Parse args (--os override + positional <device>) ─────────────────────────
+OS_OVERRIDE="auto"
+TARGET=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --os)
+            shift
+            case "${1:-}" in
+                ugos|UGOS)        OS_OVERRIDE="ugos" ;;
+                vanilla|VANILLA)  OS_OVERRIDE="vanilla" ;;
+                auto|AUTO|"")     OS_OVERRIDE="auto" ;;
+                *) echo "ERROR: --os must be ugos|vanilla|auto (got '$1')" >&2; exit 2 ;;
+            esac
+            shift
+            ;;
+        --os=*)
+            v="${1#--os=}"
+            case "$v" in
+                ugos|UGOS)        OS_OVERRIDE="ugos" ;;
+                vanilla|VANILLA)  OS_OVERRIDE="vanilla" ;;
+                auto|AUTO)        OS_OVERRIDE="auto" ;;
+                *) echo "ERROR: --os must be ugos|vanilla|auto (got '$v')" >&2; exit 2 ;;
+            esac
+            shift
+            ;;
+        -h|--help)
+            sed -n '2,30p' "$0"; exit 0
+            ;;
+        --) shift; TARGET="${1:-}"; break ;;
+        -*) echo "ERROR: unknown flag '$1'" >&2; exit 2 ;;
+        *)  TARGET="$1"; shift ;;
+    esac
+done
+
+DETECTED="$IS_UGOS"
+case "$OS_OVERRIDE" in
+    ugos)
+        IS_UGOS="yes"
+        UGOS_HINTS+=("--os ugos override (user-supplied)")
+        ;;
+    vanilla)
+        IS_UGOS="no"
+        UGOS_HINTS=("--os vanilla override (user-supplied)")
+        ;;
+    auto)
+        : # keep auto-detection result
+        ;;
+esac
 
 echo ""
 if [ "$IS_UGOS" = "yes" ]; then
-    echo "Detected: UGREEN OS (${UGOS_HINTS[*]})"
+    echo "Environment: UGREEN OS (${UGOS_HINTS[*]})"
     echo "Native mount is expected to SUCCEED on this kernel."
 else
-    echo "Detected: vanilla Linux"
+    echo "Environment: vanilla Linux"
     echo "Native mount of an unpatched UGREEN volume is expected to FAIL."
 fi
+if [ "$OS_OVERRIDE" != "auto" ]; then
+    echo "(auto-detect would have said: $([ "$DETECTED" = "yes" ] && echo UGOS || echo vanilla); overridden by --os $OS_OVERRIDE)"
+fi
 echo ""
-
-# ── Target selection ─────────────────────────────────────────────────────────
-
-TARGET="${1:-}"
 
 list_candidates() {
     echo "Scanning for BTRFS volumes..."
@@ -198,7 +288,21 @@ echo ""
 echo "===== [3/6] Native mount probe (read-only) ====="
 PROBE_MNT="$(mktemp -d -t btrfs_probe_XXXXXX)"
 MOUNT_RC=0
-mount -o ro "$TARGET" "$PROBE_MNT" 2>&1 || MOUNT_RC=$?
+# `mount -o ro` alone is NOT strictly read-only on btrfs: the kernel may
+# replay the log tree, which is a write to the device. We add nologreplay
+# and norecovery so the probe really is read-only, even on a healthy live
+# pool. ext4 ignores these options harmlessly.
+PROBE_OPTS="ro,nologreplay,norecovery,noload,noatime,nodiratime"
+# Bracket the device with blockdev --setro for belt-and-braces — kernel
+# will refuse any write attempt even if a mount option is misinterpreted.
+RO_RESTORE=""
+if blockdev --getro "$TARGET" 2>/dev/null | grep -q '^0$'; then
+    if blockdev --setro "$TARGET" 2>/dev/null; then
+        RO_RESTORE="yes"
+        echo "(set $TARGET read-only at the block layer for probe)"
+    fi
+fi
+mount -o "$PROBE_OPTS" "$TARGET" "$PROBE_MNT" 2>&1 || MOUNT_RC=$?
 if [ "$MOUNT_RC" -eq 0 ]; then
     echo "Mount succeeded (rc=0)."
     echo "Top-level entries:"
@@ -220,6 +324,11 @@ else
     dmesg --ctime 2>/dev/null | grep -iE 'btrfs|ugacl|incompat' | tail -n 20 || true
 fi
 rmdir "$PROBE_MNT" 2>/dev/null || true
+# Restore the block-layer read-write state if we changed it.
+if [ "$RO_RESTORE" = "yes" ]; then
+    blockdev --setrw "$TARGET" 2>/dev/null || true
+    echo "(restored $TARGET to read-write at the block layer)"
+fi
 echo ""
 
 # ── 4. patch_btrfs_ugos.py --check ───────────────────────────────────────────

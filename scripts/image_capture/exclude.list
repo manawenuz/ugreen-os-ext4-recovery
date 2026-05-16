@@ -1,0 +1,67 @@
+# Paths excluded from the Phase B rootfs capture.
+# Patterns are interpreted by tar --exclude-from.
+# Lines starting with # are comments; blank lines ignored.
+#
+# Rationale grouped by category. Edit before running if you want to add
+# more paths, but DO NOT remove the pseudo-filesystem and data-pool guards.
+
+# --- pseudo-filesystems (would never be captured anyway thanks to
+# --one-file-system, listed defensively) -----------------------------------
+/proc/*
+/sys/*
+/dev/*
+/run/*
+
+# --- mount points typically used for data ---------------------------------
+/mnt/*
+/media/*
+/volume*/
+/volume*/*
+/storage/*
+/pool*/*
+/data/*
+
+# --- caches, logs, tmp (large, useless for our purposes) ------------------
+/var/cache/*
+/var/log/*
+/var/tmp/*
+/var/lib/systemd/coredump/*
+/var/lib/journal/*
+/var/spool/*
+/tmp/*
+/root/.cache/*
+/root/.local/share/Trash/*
+/home/*/.cache/*
+/home/*/.local/share/Trash/*
+/home/*/Downloads/*
+/home/*/Trash/*
+
+# --- swap and hibernation -------------------------------------------------
+/swap.img
+/swapfile
+/var/swap
+/var/swapfile
+/var/lib/hibernate/*
+
+# --- docker / container images (huge, irrelevant) -------------------------
+/var/lib/docker/*
+/var/lib/containerd/*
+/var/lib/containers/*
+/var/lib/libvirt/images/*
+/var/lib/kubelet/*
+
+# --- common large media / backup paths users put under / -------------------
+/backup/*
+/backups/*
+/recordings/*
+
+# --- core dumps, crash dumps ----------------------------------------------
+/var/crash/*
+**/core.[0-9]*
+**/*.core
+
+# --- ugreen-specific large caches (best-effort, refine after first run) ---
+/var/lib/ugreen*/cache/*
+/var/lib/ugos*/cache/*
+/var/lib/ugreen*/thumbnails/*
+/var/lib/ugos*/thumbnails/*
