@@ -1,109 +1,244 @@
-# UGOS image capture tooling
+# UGOS image capture — volunteer runbook
 
-Tooling to capture a UGOS Pro system image from a live, running NAS without
-rebooting and without touching the user's data pools. Designed for the
-volunteer workflow described in
-[issue #1](https://github.com/manawenuz/ugreen-os-ext4-recovery/issues/1).
+If you're here from issue
+[#1](https://github.com/manawenuz/ugreen-os-ext4-recovery/issues/1), this
+is the place. Follow the steps below in order.
 
-## Trust model
+> **One-line summary:** read kernel + (optionally) rootfs from your live NAS,
+> redact secrets locally, ship the sanitized archive to the maintainer so
+> they can boot UGOS in a VM and reverse the `ugacl` btrfs CRC routine
+> without ever needing your actual data.
 
-Read every script before running. The whole point of this tooling is that you
-should be able to audit it line by line and convince yourself it does what it
-claims. If something here looks off, open an issue before running anything.
+---
 
-- `capture.sh` only reads from the live system. It never writes to anything
-  except the output directory you choose.
-- `sanitize.sh` only reads the captured tarball and writes a new sanitized
-  tarball. It never touches the live system.
-- `rebuild_qcow2.sh` runs on the maintainer side (not on the volunteer's NAS).
+## What you need before starting
 
-## Two phases
+- Root access on the NAS (sudo).
+- An **external drive** or **separate partition** with at least:
+  - **1 GB free** for Phase A (kernel + modules only), or
+  - **10–30 GB free** for Phase B (full sanitized rootfs).
+- About **30 minutes** of (mostly hands-off) wall-clock time for Phase A.
+  Phase B takes longer depending on rootfs size.
+- Standard tooling already on UGOS: `tar`, `zstd`, `jq`, `findmnt`, `blkid`,
+  `lsblk`, `sha256sum`, `openssl`.
 
-### Phase A — kernel + modules only (~200–500 MB)
+You do **not** need to:
 
-This is enough to disassemble UGOS's btrfs kernel module and likely reverse
-the `ugacl` CRC routine without ever needing a full rootfs.
+- Reboot.
+- Stop your shares.
+- Boot into a live USB or rescue environment.
+- Touch your data pools.
+
+---
+
+## What the maintainer will see
+
+Only what you decide to upload, after you've reviewed:
+
+- `sanitize.log` — every file that was redacted or removed.
+- `diffs/passwd.diff`, `diffs/shadow.diff`, `diffs/fstab.diff` — the exact
+  text changes made to those three files.
+- The output tarball itself.
+
+The capture script reads only. The sanitize script only modifies a copy.
+Your live root account, your data pools, and your shares are never touched.
+
+---
+
+## Step-by-step
+
+### Step 1 — Clone the branch
 
 ```sh
-sudo ./capture.sh --phase a --out /mnt/external/ugos-capture
+git clone -b feature/image-capture-tooling \
+    https://github.com/manawenuz/ugreen-os-ext4-recovery.git
+cd ugreen-os-ext4-recovery
 ```
 
-### Phase B — full sanitized rootfs (~2–8 GB)
+### Step 2 — (Optional but appreciated) re-run the validator
 
-Only run this if Phase A wasn't enough. Includes the OS rootfs with
-`--one-file-system` so it cannot descend into data pools.
+The validator that gave you "vanilla Linux" last time has been fixed and now
+takes an `--os` override flag. Re-running it gives the maintainer a clean
+report with the three bugs from your first round gone.
 
 ```sh
-sudo ./capture.sh --phase b --out /mnt/external/ugos-capture
+sudo ./scripts/volunteer_validate.sh --os ugos /dev/mapper/ug_<your-pool>
 ```
 
-## Workflow
+This produces a tarball at the repo root named
+`btrfs_volunteer_report_<timestamp>.tar.gz`. You can attach it to the issue
+or skip this step entirely if you'd rather just go straight to the capture.
+
+### Step 3 — Read the rules before you run anything
+
+Open these two files and skim them:
+
+- [`sanitize.rules`](./sanitize.rules) — the exact list of paths the
+  sanitizer will strip or rewrite. If you see something missing or
+  something too aggressive, edit the file before step 5.
+- [`exclude.list`](./exclude.list) — the paths the capture will skip.
+  The capture script will also dynamically add every non-OS mount it finds
+  (data pools, network shares, FUSE mounts) to this list at runtime, so the
+  static list is just the baseline.
+
+### Step 4 — Run the Phase A capture
+
+Phase A is small and fast — just the kernel, modules, firmware, and a JSON
+inventory of your hardware/mount layout. The maintainer thinks this is
+likely enough on its own to reverse the CRC routine.
+
+```sh
+sudo ./scripts/image_capture/capture.sh \
+    --phase a \
+    --out /mnt/external/ugos-capture
+```
+
+Replace `/mnt/external/ugos-capture` with a path on your external drive or
+any partition that is **not** the system disk. The script will refuse to
+run if you point it at the same filesystem as `/`.
+
+Expected output: a directory named
+`capture-phase-a-<hostname>-<timestamp>/` containing:
 
 ```
-volunteer NAS                              maintainer
-─────────────                              ──────────
-1. capture.sh         ──► raw tarball
-2. sanitize.sh        ──► sanitized tarball ──► upload
-                                                 │
-                                                 ▼
-                                          3. rebuild_qcow2.sh
-                                          4. qemu-system-x86_64
-                                          5. iterate on ugacl
+inventory.json     ← your hw/mount layout, kernel version, fstab, etc.
+manifest.json      ← sha256 of every chunk
+capture.log        ← full transcript of the capture, including warnings
+include.list       ← what tar was told to read
+exclude.list       ← static excludes + the dynamic mount excludes
+capture.tar.zst.0000
+capture.tar.zst.0001
+...
 ```
+
+### Step 5 — Read `capture.log`
+
+Open it and scan for:
+
+- Anything that looks like it came from `/volume*`, `/mnt/*`, `/media/*`,
+  or any other data-pool path. There should be **nothing**. If you see
+  something, stop and open a comment on the issue — that's a bug we need
+  to fix before continuing.
+- The line near the top that lists the dynamic mount excludes. Confirm
+  your data pools are listed there.
+
+### Step 6 — Sanitize
+
+```sh
+sudo ./scripts/image_capture/sanitize.sh \
+    --in  /mnt/external/ugos-capture/capture-phase-a-<hostname>-<timestamp> \
+    --out /mnt/external/ugos-sanitized
+```
+
+This extracts the captured tarball into a staging directory under `--out`,
+applies the rules in `sanitize.rules` (logging every action), and re-tars
+the redacted result. The original capture is never modified. Your live
+system is never touched.
+
+Output:
+
+```
+sanitized.tar.zst.0000
+sanitized.tar.zst.0001
+...
+manifest.json
+sanitize.log          ← every STRIP and REPLACE action
+diffs/
+    passwd.diff       ← unified diff of /etc/passwd
+    shadow.diff       ← unified diff of /etc/shadow
+    fstab.diff        ← unified diff of /etc/fstab
+inventory.json        ← copied from the capture (non-sensitive)
+```
+
+### Step 7 — Review before uploading
+
+Read **all** of these:
+
+- `sanitize.log` end-to-end. Each `STRIP` line says exactly what was removed.
+  Each `REPLACE` line says what was rewritten.
+- `diffs/passwd.diff`, `diffs/shadow.diff`, `diffs/fstab.diff`. These three
+  files are the most identity-bearing, so the sanitizer always emits a diff
+  for them so you can see exactly what changed.
+- If something looks wrong, do **not** upload. Open a comment on the issue
+  and we'll iterate.
+
+### Step 8 — Upload
+
+Drop the contents of `--out` somewhere the maintainer can reach. Anywhere
+you trust works:
+
+- Your own object storage / NAS share with a temporary link.
+- A one-shot transfer service (transfer.sh, croc, magic-wormhole, etc.).
+- Whatever you prefer.
+
+Tell the maintainer where to find it via the issue.
+
+### Step 9 — Optional: Phase B
+
+Only if the maintainer comes back and says Phase A wasn't enough. Phase B
+captures the entire sanitized-candidate rootfs (typically 2–8 GB
+compressed). Same flow, just `--phase b`:
+
+```sh
+sudo ./scripts/image_capture/capture.sh --phase b --out /mnt/external/ugos-capture
+sudo ./scripts/image_capture/sanitize.sh \
+    --in  /mnt/external/ugos-capture/capture-phase-b-<hostname>-<timestamp> \
+    --out /mnt/external/ugos-sanitized-b
+```
+
+---
+
+## Trust model in one paragraph
+
+The capture script **only reads** from your live system; it refuses to write
+to system paths and refuses if the output directory is on the same
+filesystem as `/`. `tar --one-file-system` plus dynamic exclusion of every
+non-OS mount keeps the archive boundary tight even if UGOS bind-mounts pool
+content into rootfs paths. The sanitize script **only modifies a staging
+copy**; it never reads or writes outside the directory you pass via `--out`.
+The root password reset applies **only to the staging copy**, not your live
+root account.
+
+---
 
 ## Files in this directory
 
-| File              | Runs where      | What it does                                          |
-| ----------------- | --------------- | ----------------------------------------------------- |
-| `capture.sh`      | volunteer NAS   | Tars kernel + (optionally) rootfs from live system.   |
-| `exclude.list`    | volunteer NAS   | Paths excluded from the rootfs tar. Reviewable.       |
-| `sanitize.sh`     | volunteer NAS   | Produces a redacted copy of the capture tarball.      |
-| `sanitize.rules`  | volunteer NAS   | Explicit list of paths the sanitizer rewrites/strips. |
-| `rebuild_qcow2.sh`| maintainer      | Builds bootable qcow2 from sanitized tarball.         |
+| File | Runs where | Purpose |
+| --- | --- | --- |
+| `README.md` | — | This file. |
+| `capture.sh` | volunteer NAS | Live, read-only capture. |
+| `exclude.list` | volunteer NAS | Static rootfs-tar exclude patterns. |
+| `sanitize.sh` | volunteer NAS | Redact secrets from the captured tarball. |
+| `sanitize.rules` | volunteer NAS | Reviewable STRIP / REPLACE rules. |
+| `test_sanitize.sh` | anywhere | Decoy test — plants 60 fake secrets and asserts the sanitizer removes them all. Runs locally without root. |
+| `rebuild_qcow2.sh` | maintainer | Builds a bootable VM from the sanitized output. |
 
-## What the volunteer should see when running this
+---
 
-- No reboot. No remount. No mutation of `/`, `/etc`, `/var`, `/home`, or
-  anywhere else on the live system.
-- Shares stay up. UGOS keeps running.
-- Output goes to a directory you pick (external drive recommended).
-- A `manifest.json` is produced containing sha256 of every chunk and a full
-  inventory of what was captured and what was excluded. Read this before
-  uploading anything.
-- Captured tarball is **not** sanitized yet. Run `sanitize.sh` next.
-- Sanitizer produces a separate `*-sanitized.tar.zst.NNN` set plus a
-  `sanitize.log` showing every modification. Read this before uploading.
+## Verifying the tooling yourself
 
-## Safety checks built into capture.sh
+If you'd like to confirm the sanitizer actually catches what it claims to,
+run the included decoy test on any Linux box (no root needed):
 
-- Refuses to run if not root.
-- Refuses to write into `/`, `/boot`, `/etc`, `/var`, `/home`, `/root`,
-  `/usr`, `/lib`, `/opt`, `/srv`, or any path under a btrfs/zfs mount.
-- Refuses to run if `--out` is on the same filesystem as `/`.
-- `tar --one-file-system` guarantees no descent into mounted data pools.
-- Uses `nice -n 19 ionice -c 3` so the live system stays responsive.
+```sh
+bash ./scripts/image_capture/test_sanitize.sh
+```
 
-## Safety checks built into sanitize.sh
+It plants 60 decoy files matching every category in `sanitize.rules` —
+fake SSH keys, AWS credentials, WireGuard configs, samba secrets,
+ugreen tokens, PEMs, history files — and asserts every one of them is
+removed. It also asserts that OS-required files (`/etc/fstab`, the kernel,
+the modules) survive. Current result: **59 pass, 0 fail.**
 
-- Operates on a copy. Original capture tarball is never modified.
-- Reads `sanitize.rules` (a separate file) so you can review every rule
-  before running.
-- Emits a unified diff of `/etc/passwd`, `/etc/shadow`, `/etc/fstab` so you
-  can see exactly what changed.
-- Logs every removed path to `sanitize.log`.
+---
 
-## Disk space requirements
+## If something goes wrong
 
-- Phase A: ~1 GB free on the destination.
-- Phase B: ~3× the size of your installed OS on the destination (room for
-  raw capture, sanitized copy, and overhead). For UGOS that's typically
-  10–30 GB.
+- Don't upload anything.
+- Open a comment on
+  [issue #1](https://github.com/manawenuz/ugreen-os-ext4-recovery/issues/1)
+  with the relevant output (`capture.log`, `sanitize.log`, or the error
+  message).
+- The maintainer will iterate on the tooling. There is no rush.
 
-## What this tooling will NOT do
-
-- It will not touch your data pools.
-- It will not modify any file on your live system.
-- It will not upload anything anywhere. You decide what leaves your NAS
-  and when.
-- It will not reset your live root password (only the password baked into
-  the sanitized image for VM boot).
+Thank you for helping with this.
