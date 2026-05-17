@@ -1,8 +1,52 @@
-# UGOS image capture — volunteer runbook
+# UGOS image capture — maintainer-requested fallback
 
-If you're here from issue
-[#1](https://github.com/manawenuz/ugreen-os-ext4-recovery/issues/1), this
-is the place. Follow the steps below in order.
+> [!warning]
+> **Status: maintainer-requested fallback, not the default volunteer entry point.**
+>
+> If you're a volunteer looking for what to run, the default tool is
+> `scripts/volunteer_collect.sh` (see `scripts/VOLUNTEER_COLLECT_README.md`).
+> That collector captures a smaller, targeted metadata bundle and is what we
+> want for almost all debugging work.
+>
+> Run `image_capture/` **only if a maintainer has explicitly asked you to**.
+> This tool produces a much larger bundle (1–30 GiB) intended for booting
+> UGOS in a VM, and it has known blockers documented below that must be
+> understood before running.
+
+## Known blockers (per `PRD_AUDIT_LEGACY_TOOLING.md`)
+
+Before this tool is offered to a second volunteer, the following defects
+need fixing:
+
+- **`apply_strip` deletes by basename glob without a `-type f` filter**
+  (`sanitize.sh`). Patterns like `**/secret*`, `**/*.pem`, `**/*.key`
+  recursively `rm -rf` anything matching, including CPython's stdlib
+  `secrets.py`, system CA bundle PEMs, and Xorg keyboard `.key` files.
+  The resulting sanitised rootfs may be missing libraries needed to boot.
+  `test_sanitize.sh` does not catch this because its keepers list has no
+  library files.
+
+- **`inventory.json` is documented as "non-sensitive metadata" but isn't.**
+  It contains the unmodified hostname, mount UUIDs, kernel cmdline, and
+  **block-device serial numbers** (via `lsblk -O`). The sanitiser does not
+  touch it. Volunteers were told it was safe to share.
+
+- **`/etc/hostname` is explicitly preserved in KEEPERS.** On consumer NAS,
+  hostname is often serial-derived (`UGREEN-DXP4800-XXXXXXX`). This leaks
+  the device serial.
+
+- **Phase B captures the live UGOS rootfs without quiescing.** No
+  fs-freeze, no snapshot. Any sqlite/btree database being written produces
+  a torn copy, and the resulting VM may fail to boot.
+
+- **Sanitisation gaps** in network leases (systemd-networkd), bluetooth
+  pairings, user dotfiles (`.git-credentials`, browser profiles),
+  `/etc/hosts`, `*.crt`-with-embedded-private-key, and `authorized_keys2`
+  / `*.pub` files.
+
+---
+
+## Original runbook (if a maintainer has asked you to run this anyway)
 
 > **One-line summary:** read kernel + (optionally) rootfs from your live NAS,
 > redact secrets locally, ship the sanitized archive to the maintainer so

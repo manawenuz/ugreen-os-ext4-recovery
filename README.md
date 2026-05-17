@@ -92,7 +92,19 @@ The interactive script will:
 5. Safely clean up the snapshot.
 6. Ask for final confirmation before permanently fixing the real disk.
 
-**Volunteer Testing:** If you are helping test BTRFS support on your UGREEN NAS, please follow the detailed guide in [`BTRFS_TESTING.md`](BTRFS_TESTING.md). It contains step-by-step read-only and COW-snapshot testing instructions, plus a comprehensive log-gathering checklist.
+## Helping us debug? (Volunteer flow)
+
+If the maintainers have asked you for evidence to help debug the BTRFS path, **three tools exist; pick one based on what we asked for**:
+
+| If we asked you to…                                                | Run                                          | Output size  | Time   |
+|--------------------------------------------------------------------|----------------------------------------------|--------------|--------|
+| Give us a metadata bundle for local VM reproduction *(default)*    | `sudo ./scripts/volunteer_collect.sh`        | 200 MB–1.5 GB | ~10 min |
+| Give us a bootable UGOS VM image *(maintainer-requested fallback)* | `sudo ./scripts/image_capture/capture.sh …`  | 1–30 GB       | 30+ min |
+| Smoke-test the read-only patcher on a known-safe target *(maintainer only)* | `sudo ./scripts/volunteer_validate.sh` *(deprecated)* | few MB | 2 min |
+
+**Default if a maintainer hasn't told you which:** run `volunteer_collect.sh`. Stop. Attach the tarball to the GitHub issue. We'll ask for more if we need it.
+
+See [`scripts/VOLUNTEER_COLLECT_README.md`](scripts/VOLUNTEER_COLLECT_README.md) for what the default collector captures and what it scrubs before sending. See [`scripts/image_capture/README.md`](scripts/image_capture/README.md) for the bootable-image fallback (read the "Known blockers" section before running). See [`BTRFS_TESTING.md`](BTRFS_TESTING.md) for the step-by-step walkthrough.
 
 ## Notes & Gotchas
 * **ugacl_vfs Warning:** Once mounted on standard Linux, you may see `ugacl_vfs request_module failed` in `dmesg`. This is just Linux ignoring UGREEN's proprietary Access Control List (ACL) tags and safely falling back to standard POSIX permissions. It does not affect data integrity.

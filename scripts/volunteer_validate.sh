@@ -37,6 +37,45 @@
 
 set -uo pipefail
 
+# ── Deprecation banner ──────────────────────────────────────────────────────
+# This script has been superseded by scripts/volunteer_collect.sh, which
+# captures everything this validator does (full 64 KiB SB regions, dmesg,
+# system geometry) plus more, plus mandatory sanitisation, plus a gated
+# output path. See PRD_AUDIT_LEGACY_TOOLING.md for the audit that produced
+# this deprecation and the specific blockers (unsafe blockdev --setro/setrw
+# bracket and no sanitisation of the bundle) that would have needed fixing
+# to keep this script on the volunteer path.
+#
+# The script still runs — maintainers may want it as a local smoke test
+# on a known-safe loopback or COW snapshot — but volunteers should be
+# directed to volunteer_collect.sh instead.
+
+cat <<'EOF' >&2
+==============================================================================
+ DEPRECATED: volunteer_validate.sh has been superseded.
+
+   New volunteer-facing entry point:
+
+       sudo ./scripts/volunteer_collect.sh                # dry run
+       sudo ./scripts/volunteer_collect.sh --confirm      # capture
+
+   Why: the new collector captures the same evidence this validator does
+   (full superblock regions, kernel logs, btrfs-progs dump-super output)
+   plus the kernel + modules needed for local VM reproduction, runs
+   mandatory sanitisation on all text artefacts before bundling, and
+   refuses to write its output under volunteer-data filesystems.
+
+   This script's known blockers (PRD_AUDIT_LEGACY_TOOLING.md):
+   - unsafe blockdev --setro / --setrw bracket can strand the device
+     read-only on Ctrl-C (the restore lives outside the cleanup trap)
+   - tarball is NOT sanitised — hostnames, MACs, serials, WWNs, UUIDs
+     ship to public issues as-is
+
+   Continuing in 5 seconds; press Ctrl-C to abort.
+==============================================================================
+EOF
+sleep 5
+
 # ── Preamble ─────────────────────────────────────────────────────────────────
 
 if [ "$EUID" -ne 0 ]; then
@@ -403,12 +442,15 @@ esac
 if [ "$ok" -eq 1 ]; then
     echo "✅ All read-only checks behaved as expected for this environment."
     echo ""
-    echo "Next step (OPTIONAL, still safe — uses a COW snapshot, no writes to $TARGET):"
-    echo "    sudo $SCRIPT_DIR/recover_btrfs.sh $TARGET"
-    echo "When recover_btrfs.sh asks 'Are you ready to permanently patch?' — answer N."
+    echo "Your next step (volunteer flow): attach the report tarball to the"
+    echo "GitHub issue. Do NOT run recover_btrfs.sh — that script's final"
+    echo "real-disk-write step is currently locked down (see"
+    echo "PRD_BUGS_BTRFS_PATCH.md §3). If you want to give us more material"
+    echo "for local reproduction, run the new collector:"
+    echo "    sudo $SCRIPT_DIR/volunteer_collect.sh"
 else
     echo "⚠️  At least one check did not match expectations. Send the report tarball"
-    echo "    to the maintainers BEFORE running recover_btrfs.sh or any write operation."
+    echo "    to the maintainers. Do not run recover_btrfs.sh or any write operation."
 fi
 
 echo ""
