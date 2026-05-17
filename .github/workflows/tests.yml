@@ -1,0 +1,74 @@
+name: tests
+
+# Regression guard for BUG-016 (wrong crc32c polynomial form in the
+# btrfs patcher). The unit tests in tests/test_crc32c.py pin standard
+# RFC 3720 vectors, the table-structure invariants, the real-disk-
+# write lockdown gates, and a patch_superblock → verify_superblock_crc
+# round-trip on a synthetic 4 KiB block. A future revert of the
+# polynomial constant (or any equivalent regression) would fail these
+# tests immediately.
+#
+# See:
+#   - tests/test_crc32c.py (the regression guard itself)
+#   - PRD_BUGS_BTRFS_PATCH.md → BUG-016
+#   - PRD_AUDIT_PATCHER_CRC_FIX.md
+#   - docs/bug-postmortems.md
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+  pull_request:
+    branches:
+      - main
+
+# Tests are fast (< 1 second) and Linux-only is not required for the
+# Python suite — we run on the latest Ubuntu image because that's the
+# closest match to a volunteer's target environment.
+jobs:
+  unit-tests:
+    name: Python unit tests (regression guards)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Show test inventory
+        run: |
+          echo "Tests that will run:"
+          python -m unittest discover -s tests -v 2>&1 | grep '^test_' || true
+          echo ""
+          echo "If any of these fail, do not merge. See tests/test_crc32c.py"
+          echo "docstring for context on why each test exists."
+
+      - name: Run unit tests
+        run: |
+          python -m unittest discover -s tests -v
+
+  shell-syntax:
+    name: Shell-script syntax check
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: bash -n every shell script in scripts/
+        run: |
+          set -e
+          fail=0
+          while IFS= read -r -d '' f; do
+            echo "checking: $f"
+            if ! bash -n "$f"; then
+              echo "  SYNTAX ERROR in $f" >&2
+              fail=1
+            fi
+          done < <(find scripts -name '*.sh' -print0)
+          exit "$fail"
