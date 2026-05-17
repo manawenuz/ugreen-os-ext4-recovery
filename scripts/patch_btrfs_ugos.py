@@ -198,6 +198,65 @@ def _check_backup_dir_safe(backup_dir: str, device_path: str) -> bool:
     return True
 
 
+def classify_target(device_path: str) -> str:
+    """
+    Classify a write target so the patcher knows whether it's safe to
+    operate on. Returns one of:
+
+      "file"        — a regular file (e.g. test fixture / .img). Safe to
+                      write to without further ceremony.
+      "loop"        — a /dev/loop* block device. Backed by a file; safe.
+      "snapshot"    — a dm-mapper device whose dmsetup table type is
+                      "snapshot" or "snapshot-origin". Writes here go to
+                      the COW overlay, not the underlying real disk.
+      "real"        — anything else: a physical block device, a partition,
+                      a non-snapshot dm-linear (e.g. UGOS's /dev/mapper/ug_*
+                      pool volumes), an md device. Writing here modifies
+                      the user's real data.
+
+    The patcher's safety posture (see BUG-016 audit and the lockdown
+    decision recorded in PRD_BUGS_BTRFS_PATCH.md) refuses to write to
+    "real" targets unless a maintainer-approval flag is passed.
+    """
+    import subprocess
+    try:
+        real = os.path.realpath(device_path)
+    except OSError:
+        return "real"  # fail-closed: treat unknown as real
+
+    if os.path.isfile(real):
+        return "file"
+    if not os.path.exists(real):
+        return "real"
+
+    # /dev/loop* is unambiguous.
+    name = os.path.basename(real)
+    if name.startswith("loop"):
+        return "loop"
+
+    # dm-* devices: ask dmsetup what their table type is.
+    if name.startswith("dm-") or real.startswith("/dev/mapper/"):
+        try:
+            out = subprocess.run(
+                ["dmsetup", "table", real],
+                capture_output=True, text=True, timeout=5,
+            )
+            if out.returncode == 0:
+                # Table line: "<start> <length> <target-type> ..."
+                parts = out.stdout.strip().split()
+                if len(parts) >= 3:
+                    ttype = parts[2]
+                    if ttype in ("snapshot", "snapshot-origin"):
+                        return "snapshot"
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+        # dm-linear, dm-crypt, dm-raid, etc. → not a snapshot → real.
+        return "real"
+
+    # Anything else (sd*, nvme*, md*, hd*, partitions) is a real device.
+    return "real"
+
+
 def is_device_mounted_rw(device_path: str) -> bool:
     """
     Return True if `device_path` (or any partition mapped from it) appears in
@@ -309,6 +368,18 @@ def main():
         help="Allow writing to a mounted-rw device. DANGEROUS — typically "
              "you want to unmount first, or operate on a dmsetup COW snapshot. "
              "Has no effect for --check / --dump (those are read-only).",
+    )
+    # Maintainer-approval flag for real-disk writes. NOT shown in --help on
+    # purpose: this is a deliberately verbose, hard-to-type incantation
+    # whose existence the volunteer is not meant to discover by reading
+    # `--help`. See PRD_BUGS_BTRFS_PATCH.md (real-disk-write lockdown).
+    # Renaming or hiding this further requires updating both
+    # PRD_BUGS_BTRFS_PATCH.md and the test that documents the lockdown.
+    parser.add_argument(
+        "--really-write-to-real-block-device-i-have-maintainer-approval",
+        dest="commit_real_disk",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     args = parser.parse_args()
 
@@ -459,6 +530,51 @@ def main():
         print(f"  0x{offset:08X} -> {path}")
 
     # ── Interactive confirmation ──
+    # ── Real-disk-write lockdown ─────────────────────────────────────────
+    # The patcher's write path is currently NOT cleared to touch real
+    # block devices. Even recover_btrfs.sh, which sets up a COW snapshot
+    # for dry-run testing, no longer commits to the real disk at the end
+    # of its flow. Until BTRFS recovery is volunteer-validated end-to-end
+    # against the new collector bundles, writes only land on:
+    #   - regular files (.img test fixtures),
+    #   - /dev/loop* devices,
+    #   - dm-snapshot devices (the COW path).
+    # Anything else is a "real" target and is refused. See
+    # PRD_BUGS_BTRFS_PATCH.md → real-disk-write lockdown.
+    target_kind = classify_target(device)
+    if target_kind == "real" and not args.commit_real_disk:
+        print(
+            f"\nError: '{device}' looks like a real block device "
+            f"(classified: {target_kind}).\n"
+            "\n"
+            "Direct writes to real disks are currently disabled in this\n"
+            "release. Even recover_btrfs.sh no longer commits to the real\n"
+            "disk — it runs the COW-snapshot dry-run and stops there. This\n"
+            "is deliberate: the patcher has not yet been validated\n"
+            "end-to-end against a new volunteer bundle, and we don't want\n"
+            "anyone's NAS to be the first real-disk write site.\n"
+            "\n"
+            "What you can still do safely:\n"
+            "  - python3 patch_btrfs_ugos.py --check  <device>   (read-only)\n"
+            "  - python3 patch_btrfs_ugos.py --dump   <device>   (read-only backup)\n"
+            "  - sudo recover_btrfs.sh <device>                  (COW dry-run only)\n"
+            "  - patch a /dev/loop* device or an .img file       (sandbox)\n"
+            "\n"
+            "The lockdown will be lifted by an explicit maintainer release once\n"
+            "the volunteer flow is proven. See PRD_BUGS_BTRFS_PATCH.md.\n",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+    if target_kind == "real" and args.commit_real_disk:
+        # The user invoked the deliberately-verbose maintainer-approval flag.
+        # Print a very loud warning and proceed; the read-after-write
+        # verification still applies.
+        print(
+            f"\n!! REAL-DISK WRITE UNLOCKED for '{device}' via maintainer flag.\n"
+            "!! This is a manual override. Make sure you have backups.\n",
+            file=sys.stderr,
+        )
+
     # Refuse to write to a mounted-rw device unless explicitly allowed.
     # The volunteer collector applies the same gate; we mirror it here so
     # that recover_btrfs.sh isn't the only thing standing between a typo

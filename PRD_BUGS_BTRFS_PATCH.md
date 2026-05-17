@@ -75,3 +75,24 @@ A series of critical defects have been identified in the BTRFS patching toolchai
     - Each post-write step now re-reads the SB from disk and asserts (CRC valid) ∧ (UGREEN bit cleared). Future similar bugs cannot land silently because the patcher will detect the divergence between in-memory state and on-disk state at write-time, while backups are still warm.
     - Backup filenames now include nanosecond timestamp + PID, eliminating sub-second collision.
 *   **Audit memo:** `PRD_AUDIT_PATCHER_CRC_FIX.md`.
+
+## 3. Real-disk-write lockdown (active)
+
+In response to BUG-016 — a defect that would have corrupted any volunteer's filesystem if they had progressed past `--check` — the BTRFS write path is **currently locked down**. This is a policy decision recorded here so future contributors don't accidentally unlock it.
+
+**State of the lockdown:**
+
+*   `scripts/patch_btrfs_ugos.py` classifies its target as `file`, `loop`, `snapshot`, or `real`. Writes to `real` targets are refused (exit code 3) unless the verbose maintainer-approval flag `--really-write-to-real-block-device-i-have-maintainer-approval` is passed. That flag is hidden from `--help` via `argparse.SUPPRESS` so volunteers do not discover it by exploration.
+*   `scripts/recover_btrfs.sh` no longer commits to the real disk at the end of its COW dry-run. It runs the snapshot test, lets the volunteer mount-and-verify on the COW overlay, then explicitly stops with a message explaining why.
+*   Read paths (`--check`, `--dump`) are unaffected.
+
+**Pinned by:** `tests/test_crc32c.py::RealDiskWriteLockdown` — verifies that (a) the maintainer-approval flag does not appear in `--help`, (b) `classify_target` correctly distinguishes files from real devices and fails-closed on unknown paths, and (c) `recover_btrfs.sh` does not invoke the patcher against `$TARGET_DEV`.
+
+**Lift criteria** (when this section can be removed):
+
+1.  At least one volunteer bundle from the v0.2.0 `volunteer_collect.sh` has been processed end-to-end through the local repro harness (`scripts/repro/`).
+2.  `check_patcher.sh` reports agreement (exit 0) between our patcher and `btrfs-progs dump-super` on a synthetic UGACL filesystem.
+3.  At least one volunteer has successfully booted a patched COW snapshot and verified file integrity (sha1sum sample) end-to-end.
+4.  A maintainer takes explicit responsibility for lifting the lockdown via PR with a CHANGELOG entry.
+
+Until all four conditions are met, the lockdown stays. The patcher is fine code, but "fine code" was BUG-016's reputation too. Volunteer trust is the only reason we get bundles at all; one corruption event ends the project.

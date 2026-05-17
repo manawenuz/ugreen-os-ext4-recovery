@@ -140,28 +140,28 @@ trap - EXIT INT TERM HUP
 cleanup
 
 echo ""
-echo "=== Validation Complete ==="
-read -p "Did the test succeed? Are you ready to permanently patch $TARGET_DEV? (y/N) " confirm
-if [[ "$confirm" =~ ^[Yy]$ ]]; then
-    if findmnt -n "$TARGET_DEV" >/dev/null 2>&1; then
-        echo "Error: $TARGET_DEV is currently mounted. Unmount before patching." >&2
-        exit 1
-    fi
-    echo "Permanently patching $TARGET_DEV..."
-    python3 "$PATCHER" --yes "$TARGET_DEV"
-
-    echo "=== Verifying permanent patch ==="
-    VERIFY_RC=0
-    python3 "$PATCHER" --check "$TARGET_DEV" >/dev/null 2>&1 || VERIFY_RC=$?
-    if [ "$VERIFY_RC" -eq 0 ]; then
-        echo "Done! UGREEN proprietary flag is cleared."
-        echo "You can now natively mount $TARGET_DEV with any standard Linux kernel."
-    else
-        echo "WARNING: Verification failed after patching (exit $VERIFY_RC)!" >&2
-        echo "The UGREEN flag may still be present, or an error occurred." >&2
-        echo "Do NOT attempt to mount. Investigate before proceeding." >&2
-        exit 1
-    fi
-else
-    echo "Aborted permanent patch."
-fi
+echo "==========================================================="
+echo " Validation Complete — and we stop here, on purpose."
+echo "==========================================================="
+echo ""
+echo " The COW snapshot test above proves the patcher's logic"
+echo " produces a kernel-mountable filesystem. Your real disk"
+echo " ($TARGET_DEV) was never touched."
+echo ""
+echo " Permanent commit to the real disk is currently DISABLED"
+echo " in this release. Even with full operator confirmation,"
+echo " this wrapper will not write to $TARGET_DEV."
+echo ""
+echo " Why: the patcher's CRC routine was wrong for an entire"
+echo " release cycle (BUG-016). It's been fixed and pinned by"
+echo " tests, but the end-to-end flow has not yet been"
+echo " volunteer-validated against the new collector bundles."
+echo " Until it is, your NAS is not going to be the first"
+echo " real-disk write site."
+echo ""
+echo " If you need to commit to the real disk anyway, that's a"
+echo " conversation to have with the maintainers on the GitHub"
+echo " issue tracker — not something to unlock locally."
+echo ""
+echo " See: PRD_BUGS_BTRFS_PATCH.md → real-disk-write lockdown"
+echo "==========================================================="

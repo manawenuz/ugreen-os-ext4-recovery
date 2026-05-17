@@ -184,5 +184,59 @@ class PatcherRoundTrip(unittest.TestCase):
         )
 
 
+class RealDiskWriteLockdown(unittest.TestCase):
+    """Pin the real-disk-write lockdown.
+
+    Until the BTRFS recovery flow is volunteer-validated end-to-end:
+      - patch_btrfs_ugos.py refuses any write to a "real" target
+        (anything that isn't a file, /dev/loop*, or a dm-snapshot).
+      - The maintainer-approval flag exists but is hidden from --help.
+      - recover_btrfs.sh's COW dry-run ends without a real-disk write.
+
+    If any of this regresses, the project's safety story for issue #1
+    volunteers is broken. See PRD_BUGS_BTRFS_PATCH.md →
+    real-disk-write lockdown.
+    """
+
+    def test_classify_regular_file_is_file(self):
+        import tempfile
+        from patch_btrfs_ugos import classify_target
+        with tempfile.NamedTemporaryFile() as tf:
+            self.assertEqual(classify_target(tf.name), "file")
+
+    def test_classify_nonexistent_is_real_failclosed(self):
+        from patch_btrfs_ugos import classify_target
+        self.assertEqual(classify_target("/dev/this-does-not-exist-anywhere"), "real")
+
+    def test_hidden_flag_not_in_help(self):
+        import subprocess
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        out = subprocess.run(
+            [sys.executable, os.path.join(repo, "scripts", "patch_btrfs_ugos.py"), "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(out.returncode, 0, f"help should exit 0, got {out.returncode}: {out.stderr}")
+        # The verbose maintainer-approval flag must be hidden via SUPPRESS.
+        self.assertNotIn(
+            "--really-write-to-real-block-device-i-have-maintainer-approval",
+            out.stdout,
+            "Maintainer-approval flag leaked into --help; it must use argparse.SUPPRESS",
+        )
+
+    def test_recover_btrfs_sh_does_not_commit_to_real_disk(self):
+        # The shell wrapper used to invoke the patcher with `--yes "$TARGET_DEV"`
+        # after the COW test. The lockdown removes that call. If a future edit
+        # re-introduces a write to $TARGET_DEV, this test catches it.
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(repo, "scripts", "recover_btrfs.sh")) as fh:
+            body = fh.read()
+        # Must NOT contain a patcher invocation against TARGET_DEV.
+        self.assertNotIn(
+            '$PATCHER" --yes "$TARGET_DEV"',
+            body,
+            "recover_btrfs.sh invokes the patcher against the real device — lockdown is breached",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
