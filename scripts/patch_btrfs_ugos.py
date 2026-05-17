@@ -63,7 +63,16 @@ UGREEN_PROPRIETARY_BIT = 0x4000000000000000
 # ── CRC32C (Castagnoli) implementation ───────────────────────────────────────
 
 def _build_crc32c_table():
-    poly = 0x1EDC6F41
+    # Castagnoli polynomial.
+    #   Forward form (MSB-first):   0x1EDC6F41
+    #   Reflected form (LSB-first): 0x82F63B78
+    # This table-build is LSB-first (we right-shift `crc` below), so we MUST
+    # use the reflected polynomial. Using the forward form here silently
+    # produces a CRC that LOOKS like crc32c on cursory inspection but
+    # disagrees with the kernel on every non-trivial input — which is
+    # exactly the bug we hunted via the volunteer report in issue #1.
+    # Validated against RFC 3720 test vectors.
+    poly = 0x82F63B78
     table = []
     for i in range(256):
         crc = i
@@ -189,6 +198,47 @@ def _check_backup_dir_safe(backup_dir: str, device_path: str) -> bool:
     return True
 
 
+def is_device_mounted_rw(device_path: str) -> bool:
+    """
+    Return True if `device_path` (or any partition mapped from it) appears in
+    /proc/self/mountinfo with rw mount options. Returns False if we can't
+    determine state (caller should treat as safe-fail).
+
+    Used to refuse write-path operations against a live filesystem without
+    explicit operator acknowledgement.
+    """
+    try:
+        real = os.path.realpath(device_path)
+    except OSError:
+        return False
+    try:
+        with open("/proc/self/mountinfo", "r") as fh:
+            for line in fh:
+                parts = line.split()
+                # mountinfo: id parent_id maj:min root mountpoint options ...
+                if len(parts) < 6:
+                    continue
+                source = parts[len(parts) - 2] if "-" in parts else ""
+                # mountinfo field layout: source is after the "-" separator.
+                # Simpler: parse via the standard '-' delimiter.
+                try:
+                    dash = parts.index("-")
+                    source = parts[dash + 2]
+                except (ValueError, IndexError):
+                    continue
+                try:
+                    source_real = os.path.realpath(source)
+                except OSError:
+                    continue
+                if source_real == real:
+                    opts = parts[5]
+                    if "rw" in opts.split(","):
+                        return True
+    except OSError:
+        return False
+    return False
+
+
 def write_backups(valid_blocks, device_path: str, backup_dir: str) -> list:
     """
     Write each valid superblock to its own raw backup file under backup_dir.
@@ -197,13 +247,17 @@ def write_backups(valid_blocks, device_path: str, backup_dir: str) -> list:
     backup_dir = os.path.realpath(backup_dir)
     os.makedirs(backup_dir, exist_ok=True)
 
-    timestamp = int(time.time())
+    # Nanosecond timestamp + PID makes sub-second re-runs unique, and binds
+    # the backup to the process that produced it. Combined with device basename
+    # this is enough disambiguation in practice.
+    ns_ts = time.time_ns()
+    pid = os.getpid()
     safe_name = Path(device_path).name.replace("/", "_")
     backups = []
 
     for offset, block in valid_blocks:
         backup_name = (
-            f"btrfs_sb_backup_{safe_name}_offset_{offset:08X}_{timestamp}.bin"
+            f"btrfs_sb_backup_{safe_name}_offset_{offset:08X}_{ns_ts}_pid{pid}.bin"
         )
         backup_path = Path(backup_dir) / backup_name
         with open(backup_path, "wb") as f:
@@ -248,6 +302,13 @@ def main():
         default=".",
         help="Directory for superblock backups (default: current directory). "
              "Should be on a different physical disk than the target device.",
+    )
+    parser.add_argument(
+        "--allow-mounted",
+        action="store_true",
+        help="Allow writing to a mounted-rw device. DANGEROUS — typically "
+             "you want to unmount first, or operate on a dmsetup COW snapshot. "
+             "Has no effect for --check / --dump (those are read-only).",
     )
     args = parser.parse_args()
 
@@ -398,6 +459,30 @@ def main():
         print(f"  0x{offset:08X} -> {path}")
 
     # ── Interactive confirmation ──
+    # Refuse to write to a mounted-rw device unless explicitly allowed.
+    # The volunteer collector applies the same gate; we mirror it here so
+    # that recover_btrfs.sh isn't the only thing standing between a typo
+    # and a live filesystem.
+    if is_device_mounted_rw(device):
+        if not args.allow_mounted:
+            print(
+                f"\nError: '{device}' is currently mounted read-write.\n"
+                "Writing to a mounted btrfs filesystem under the kernel's feet "
+                "can corrupt it.\n\n"
+                "Either:\n"
+                "  1. Unmount the filesystem first, OR\n"
+                "  2. Operate on a dmsetup COW snapshot (see recover_btrfs.sh), OR\n"
+                "  3. Re-run with --allow-mounted if you really know what you're doing.\n",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        else:
+            print(
+                f"\nWARNING: '{device}' is mounted read-write and --allow-mounted "
+                "was passed. Proceeding under operator override.",
+                file=sys.stderr,
+            )
+
     if not args.yes:
         print(
             "\nWARNING: This will PERMANENTLY modify the BTRFS superblocks on "
@@ -454,7 +539,42 @@ def main():
             f.write(block)
             f.flush()
             os.fsync(f.fileno())
-            print(f"  Patched and verified mirror 0x{offset:08X}")
+
+            # Read-after-write verification. The CRC bug that motivated this
+            # entire audit cycle (issue #1) was undetectable for an entire
+            # release cycle precisely because nothing re-read the disk after
+            # writing. If the patcher's CRC routine ever regresses again, the
+            # in-memory `block` will look fine but what landed on disk will
+            # be wrong. Catch that here, while we still have the original
+            # backups within arm's reach.
+            f.seek(offset)
+            written = bytearray(f.read(BTRFS_SUPER_INFO_SIZE))
+            if len(written) != BTRFS_SUPER_INFO_SIZE:
+                print(
+                    f"  FATAL: short read after write at mirror 0x{offset:08X} "
+                    f"(got {len(written)} bytes). DO NOT proceed; restore from backup.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            ok, stored, computed = verify_superblock_crc(written)
+            if not ok:
+                print(
+                    f"  FATAL: post-write CRC mismatch at mirror 0x{offset:08X} "
+                    f"(stored=0x{stored:08X}, computed=0x{computed:08X}).\n"
+                    "  This means either the write didn't land correctly or our "
+                    "CRC routine regressed. Restore IMMEDIATELY from the backup "
+                    "file listed above; do not let any further writes happen.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if verify_ugreen_flag_set(written):
+                print(
+                    f"  FATAL: post-write read still shows UGREEN flag set at "
+                    f"mirror 0x{offset:08X}. Restore from backup.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            print(f"  Patched and verified (read-back) mirror 0x{offset:08X}")
 
     print("\nDone! The UGREEN proprietary flag has been cleared.")
     print(
