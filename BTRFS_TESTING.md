@@ -208,13 +208,20 @@ Press `[Enter]` in the first terminal when you are satisfied.
 
 ### 4.3 After teardown
 
-The script will ask:
+The script will print:
 
 ```
-Did the test succeed? Are you ready to permanently patch <TARGET>? (y/N)
+==========================================================
+ Validation Complete — and we stop here, on purpose.
+==========================================================
 ```
 
-**Type `N` and press Enter.** We are only testing. Do NOT permanently patch during this volunteer test unless explicitly instructed.
+…and exit. **There is no longer a "permanently patch?" prompt.** The
+real-disk write path is currently locked down in this release (see
+`PRD_BUGS_BTRFS_PATCH.md` §3 — "Real-disk-write lockdown"). The COW
+snapshot proved the patcher logic works on your data; that's the only
+question we wanted to answer for this round. Your real disk
+(`$TARGET_DEV`) was never touched.
 
 ---
 
@@ -279,8 +286,8 @@ echo "===== End of Report ====="
 
 | ❌ Never Do This | Why |
 |---|---|
-| `sudo ./scripts/patch_btrfs_ugos.py /dev/mapper/ug_...` (without `--check` or `--dump` first) | This would write directly to your disk without a COW snapshot. |
-| Type `y` at the permanent patch prompt in `recover_btrfs.sh` | This applies the patch to the real disk. We are testing, not fixing yet. |
+| `sudo ./scripts/patch_btrfs_ugos.py /dev/mapper/ug_...` (without `--check` or `--dump` first) | Currently locked down — the script refuses real-block-device writes (exit 3) and points you here. Use `--check` instead. |
+| Type `y` at the permanent patch prompt in `recover_btrfs.sh` | No such prompt exists anymore. The wrapper stops after the COW test. |
 | Delete the `btrfs_sb_backup_*.bin` files | These are your rollback insurance. |
 | Run any `dd` restore command unless you know exactly what you are doing | Restoring the wrong block to the wrong offset corrupts the superblock. |
 | Back up to the same disk being patched | If the patch goes wrong, the backup is on the same failed disk. Always use `--backup-dir` on a different physical device. |

@@ -118,10 +118,15 @@ different conversation. Don't run that one without us.
 
 ## After you send the bundle
 
-You're done. Don't run `recover_btrfs.sh` or `patch_btrfs_ugos.py`.
+You're done. You can still safely run `patch_btrfs_ugos.py --check` or
+`--dump` (both read-only) any time you like. Real-disk writes are
+currently locked down in this release — even `recover_btrfs.sh` only
+performs a COW-snapshot dry-run and stops there. See
+`PRD_BUGS_BTRFS_PATCH.md` §3 for the policy.
+
 We'll reproduce the issue locally with what you sent, post a fix, and
-come back to you with a separate, audited recovery script if and when
-it's actually needed.
+come back to you with a clear go-ahead if a real-disk patch ever
+becomes the right move.
 
 ## If something goes wrong
 

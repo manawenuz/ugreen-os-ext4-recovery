@@ -32,6 +32,12 @@ A CLI tool designed to directly manipulate the BTRFS superblocks on a target blo
 5.  **Recalculate Checksum:** Zero out the first 32 bytes, calculate the CRC32C hash over bytes `0x20` to `0xFFF`, and write the 4-byte digest back to `0x00`.
 6.  **Commit:** Write the patched 4KiB block back to the exact physical offset on the device. Repeat for all superblock mirrors.
 
+> **Status note (post-BUG-016):** real-disk writes are currently locked down
+> in `patch_btrfs_ugos.py` and `recover_btrfs.sh`. The flow described in §3.2
+> below runs through step 5 (mount-and-verify on the COW snapshot) and then
+> stops; step 6 (commit to real disk) is disabled. See
+> `PRD_BUGS_BTRFS_PATCH.md` §3 for the lift criteria.
+
 ### 3.2 Safety Wrapper: `recover_btrfs.sh`
 Following the exact safety paradigm established for the EXT4 fix, we will never test the patch on live user data.
 

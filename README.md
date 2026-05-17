@@ -36,6 +36,8 @@ We patch the standard Linux `e2fsprogs` toolkit to recognize the `0x20000000` fl
 ### btrfs
 We provide a standalone Python script (`patch_btrfs_ugos.py`) that directly manipulates the BTRFS superblocks. It clears the proprietary bit (`0x4000000000000000`), recalculates the CRC32C checksum, and writes the corrected superblock back to all mirror locations. Zero external dependencies — works with any Python 3 installation.
 
+> **Status:** the BTRFS write path is currently **locked down** while the end-to-end recovery flow is being volunteer-validated. `patch_btrfs_ugos.py --check` and `--dump` (both read-only) work normally; `recover_btrfs.sh` runs the COW-snapshot dry-run and stops there; direct real-disk writes are refused (exit 3). See `PRD_BUGS_BTRFS_PATCH.md` §3 for the policy and the four conditions required to lift it. The ext4 path is unaffected.
+
 ### COW-Snapshot Validation (Dry-run before commit)
 We do not touch your real data immediately. Our `recover.sh` and `recover_btrfs.sh` scripts utilize Linux Device Mapper (dm-snapshot) to create a RAM-backed Copy-on-Write (COW) overlay.
 1. Reads come from your real disk.
