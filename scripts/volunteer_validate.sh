@@ -289,10 +289,17 @@ echo "===== [3/6] Native mount probe (read-only) ====="
 PROBE_MNT="$(mktemp -d -t btrfs_probe_XXXXXX)"
 MOUNT_RC=0
 # `mount -o ro` alone is NOT strictly read-only on btrfs: the kernel may
-# replay the log tree, which is a write to the device. We add nologreplay
-# and norecovery so the probe really is read-only, even on a healthy live
-# pool. ext4 ignores these options harmlessly.
-PROBE_OPTS="ro,nologreplay,norecovery,noload,noatime,nodiratime"
+# replay the log tree. We want a real read-only probe.
+#
+# Modern kernel (>= 5.11) replaced `nologreplay` with `rescue=nologreplay`
+# and removed `noload` entirely. UGOS 6.12 rejects `noload` outright
+# (`btrfs: Unknown parameter 'noload'`), which made the probe falsely
+# report "mount failed" even on a healthy FS. See issue #1 for the trace.
+#
+# Strategy: try modern syntax first, fall back to the legacy form for
+# older kernels.
+PROBE_OPTS="ro,rescue=nologreplay,noatime,nodiratime"
+PROBE_OPTS_LEGACY="ro,nologreplay,norecovery,noatime,nodiratime"
 # Bracket the device with blockdev --setro for belt-and-braces — kernel
 # will refuse any write attempt even if a mount option is misinterpreted.
 RO_RESTORE=""
@@ -303,6 +310,11 @@ if blockdev --getro "$TARGET" 2>/dev/null | grep -q '^0$'; then
     fi
 fi
 mount -o "$PROBE_OPTS" "$TARGET" "$PROBE_MNT" 2>&1 || MOUNT_RC=$?
+# If the modern form is rejected (very old kernel), try legacy.
+if [ "$MOUNT_RC" -ne 0 ]; then
+    MOUNT_RC=0
+    mount -o "$PROBE_OPTS_LEGACY" "$TARGET" "$PROBE_MNT" 2>&1 || MOUNT_RC=$?
+fi
 if [ "$MOUNT_RC" -eq 0 ]; then
     echo "Mount succeeded (rc=0)."
     echo "Top-level entries:"
