@@ -33,6 +33,8 @@ Instead of the tedious process of booting a virtual machine (QEMU) with the prop
 ### ext4
 We patch the standard Linux `e2fsprogs` toolkit to recognize the `0x20000000` flag (named `ugreen_proprietary`). The patched `tune2fs` strips the flag and correctly recalculates all ext4 CRC32c checksums, permanently converting your drive back into standard, mainline-compatible `ext4`.
 
+> **Status — ext4:** This is the project's **mature path**. The maintainer uses it on their own DXP NAS and has recovered multi-TB pools with it. The patch is four hunks against upstream `e2fsprogs v1.47.1` (`patches/0001-…`) — small enough to read in five minutes; the build script will show you the diff and verify the upstream tag's GPG signature before compiling. The on-disk mutation is performed by upstream `tune2fs`, not by code we wrote. Audit memo: `PRD_AUDIT_EXT4_PATCH.md`. Known bugs: `PRD_BUGS_EXT4_PATCH.md`. If you find a new one, please open an issue with the output of `build_patched_e2fsprogs.sh` and `recover.sh`.
+
 ### btrfs
 We provide a standalone Python script (`patch_btrfs_ugos.py`) that directly manipulates the BTRFS superblocks. It clears the proprietary bit (`0x4000000000000000`), recalculates the CRC32C checksum, and writes the corrected superblock back to all mirror locations. Zero external dependencies — works with any Python 3 installation.
 
